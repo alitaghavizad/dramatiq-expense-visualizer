@@ -48,6 +48,7 @@ POSTGRES_USER=postgres
 POSTGRES_PASSWORD=your-database-password
 POSTGRES_DB=expense_visualizer
 POSTGRES_HOST=localhost
+DOCKER_POSTGRES_HOST=host.docker.internal
 POSTGRES_PORT=5432
 GEMINI_API_KEY=your-key-here
 ```
@@ -99,6 +100,9 @@ All local settings and secrets live in `.env`:
 
 - Change `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, and
   `POSTGRES_PORT` for database access.
+- Change `DOCKER_POSTGRES_HOST` if the app container should reach PostgreSQL
+  somewhere other than your laptop. Leave it as `host.docker.internal` for the
+  current separately managed database container.
 - Change `GEMINI_API_KEY` for Gemini authentication.
 - Change `GEMINI_MODEL` to select another recognition model.
 - Change `WEB_PORT`, `API_PORT`, `APP_ORIGIN`, and
@@ -146,6 +150,7 @@ Open [http://localhost:3000](http://localhost:3000). The local API listens on
 | `POSTGRES_PASSWORD` | No | Database password; defaults to `postgres` |
 | `POSTGRES_DB` | No | Database name; defaults to `expense_visualizer` |
 | `POSTGRES_HOST` | No | Database host; Compose overrides it for container networking |
+| `DOCKER_POSTGRES_HOST` | No | Database host used by the app container; defaults to `host.docker.internal` |
 | `POSTGRES_PORT` | No | Database port; defaults to `5432` |
 | `DATABASE_URL` | No | Advanced connection-string override for all `POSTGRES_*` values |
 | `GEMINI_API_KEY` | For scanning | Gemini API authentication |

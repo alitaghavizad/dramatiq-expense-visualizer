@@ -14,7 +14,7 @@ services:
     environment:
       NODE_ENV: production
       API_HOST: 0.0.0.0
-      POSTGRES_HOST: host.docker.internal
+      POSTGRES_HOST: ${DOCKER_POSTGRES_HOST:-host.docker.internal}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
