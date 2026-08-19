@@ -6,6 +6,16 @@ A local-first expense dashboard that turns Armenian and Russian receipt photos
 into reviewed PostgreSQL records. Gemini extracts the receipt, you verify every
 line, and the dashboard visualizes spending by time, category, store, and price.
 
+## Screenshots
+
+### Dashboard overview
+
+![Dramatiq dashboard with date filters, spending summaries, a timeline, and category breakdown](docs/images/main.jpg)
+
+### Receipt capture and purchase ledger
+
+![Dramatiq receipt capture, top stores, and purchase ledger with Armenian and English item names](docs/images/secondary.jpg)
+
 ## Features
 
 - Armenian and Russian receipt recognition with Google Gemini
