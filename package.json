@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "A local-first Armenian receipt scanner and PostgreSQL expense dashboard powered by Gemini.",
   "private": true,
+  "homepage": "https://github.com/alitaghavizad/dramatiq-expense-visualizer#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alitaghavizad/dramatiq-expense-visualizer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/alitaghavizad/dramatiq-expense-visualizer/issues"
+  },
   "keywords": [
     "armenian",
     "expense-tracker",

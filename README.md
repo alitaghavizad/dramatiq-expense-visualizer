@@ -1,5 +1,7 @@
 # Dramatiq
 
+[![CI](https://github.com/alitaghavizad/dramatiq-expense-visualizer/actions/workflows/ci.yml/badge.svg)](https://github.com/alitaghavizad/dramatiq-expense-visualizer/actions/workflows/ci.yml)
+
 A local-first expense dashboard that turns Armenian and Russian receipt photos
 into reviewed PostgreSQL records. Gemini extracts the receipt, you verify every
 line, and the dashboard visualizes spending by time, category, store, and price.
