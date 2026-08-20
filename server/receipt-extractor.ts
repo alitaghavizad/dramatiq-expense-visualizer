@@ -130,7 +130,7 @@ export async function extractReceipt(
         "Content-Type": "application/json",
         "Api-Revision": "2026-05-20",
       },
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(config.geminiTimeoutMs),
       body: JSON.stringify({
         model,
         store: false,

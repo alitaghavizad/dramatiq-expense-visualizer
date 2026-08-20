@@ -115,6 +115,8 @@ All local settings and secrets live in `.env`:
   current separately managed database container.
 - Change `GEMINI_API_KEY` for Gemini authentication.
 - Change `GEMINI_MODEL` to select another recognition model.
+- Change `GEMINI_TIMEOUT_MS` if complex receipt images need more or less than
+  the default 180 seconds for recognition.
 - Change `WEB_PORT`, `API_PORT`, `APP_ORIGIN`, and
   `NEXT_PUBLIC_EXPENSE_API_URL` when exposing the app on different ports.
 
@@ -165,6 +167,7 @@ Open [http://localhost:3000](http://localhost:3000). The local API listens on
 | `DATABASE_URL` | No | Advanced connection-string override for all `POSTGRES_*` values |
 | `GEMINI_API_KEY` | For scanning | Gemini API authentication |
 | `GEMINI_MODEL` | No | Recognition model; defaults to `gemini-3.7-flash` |
+| `GEMINI_TIMEOUT_MS` | No | Receipt-recognition timeout in milliseconds; defaults to `180000` |
 | `API_HOST` | No | API bind address; defaults to `127.0.0.1` |
 | `API_PORT` | No | API port; defaults to `3001` |
 | `APP_ORIGIN` | No | Comma-separated allowed browser origins |
@@ -202,7 +205,7 @@ The complete idempotent schema is in [`database/schema.sql`](database/schema.sql
 
 - The API binds to localhost by default.
 - Receipt uploads are restricted to JPG, PNG, and WEBP files under 12 MB.
-- Scan requests are rate-limited and time out after 60 seconds.
+- Scan requests are rate-limited and time out after 180 seconds by default.
 - API keys stay server-side and `.env` files are ignored by Git.
 - Docker injects `.env` at runtime; secrets are not copied into the image.
 - The application image runs as an unprivileged Linux user.
