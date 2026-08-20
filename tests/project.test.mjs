@@ -34,6 +34,8 @@ test("uses structured vision extraction without storing receipt image bytes", as
   assert.match(extractor, /type: "image"/);
   assert.match(extractor, /response_format/);
   assert.match(config, /gemini-3\.7-flash/);
+  assert.match(config, /GEMINI_TIMEOUT_MS/);
+  assert.match(extractor, /config\.geminiTimeoutMs/);
   assert.match(extractor, /generativelanguage\.googleapis\.com/);
   assert.doesNotMatch(extractor, /api\.openai\.com/);
   assert.doesNotMatch(schema, /BYTEA/i);
