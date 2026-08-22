@@ -11,6 +11,13 @@ import {
   runChatAgent,
   type ChatStage,
 } from "./chat-agent.js";
+import {
+  addChatUsage,
+  calculateEstimatedCostNanos,
+  dollarThresholdsCrossed,
+  emptyChatUsage,
+  sonnet5PricingSnapshot,
+} from "./chat-cost.js";
 import { config } from "./config.js";
 import { pool, withTransaction } from "./database.js";
 import { EXPENSE_CATEGORIES, extractReceipt, ReceiptExtractionError } from "./receipt-extractor.js";
@@ -215,6 +222,7 @@ app.get("/api/chat/conversations", async (_request, response, next) => {
   try {
     const result = await pool.query(
       `SELECT c.id::text, c.title, c.model, c.created_at, c.updated_at,
+              c.total_estimated_cost_nanos::text,
               COALESCE(message_stats.message_count, 0)::int AS message_count,
               last_message.content AS last_message,
               last_message.role AS last_message_role
@@ -251,7 +259,8 @@ app.post("/api/chat/conversations", async (request, response, next) => {
     const result = await pool.query(
       `INSERT INTO chat_conversations (title, model)
        VALUES ($1, $2)
-       RETURNING id::text, title, model, created_at, updated_at`,
+       RETURNING id::text, title, model, total_estimated_cost_nanos::text,
+                 created_at, updated_at`,
       [input.title ?? "New conversation", config.claudeModel],
     );
     response.status(201).json({ ...result.rows[0], message_count: 0, last_message: null });
@@ -265,12 +274,16 @@ app.get("/api/chat/conversations/:id/messages", async (request, response, next) 
     const conversationId = conversationIdSchema.parse(request.params.id);
     const [conversationResult, messageResult] = await Promise.all([
       pool.query(
-        `SELECT id::text, title, model, created_at, updated_at
+        `SELECT id::text, title, model, total_estimated_cost_nanos::text,
+                created_at, updated_at
          FROM chat_conversations WHERE id = $1`,
         [conversationId],
       ),
       pool.query(
-        `SELECT id::text, role, content, sources, created_at
+        `SELECT id::text, role, content, sources, input_tokens, output_tokens,
+                cache_creation_5m_input_tokens, cache_creation_1h_input_tokens,
+                cache_read_input_tokens, web_search_requests,
+                estimated_cost_nanos::text, pricing_snapshot, created_at
          FROM chat_messages
          WHERE conversation_id = $1
          ORDER BY id`,
@@ -302,7 +315,8 @@ app.post("/api/chat/conversations/:id/messages", chatRateLimit, async (request, 
     const input = sendChatMessageSchema.parse(request.body);
     const conversationState = await withTransaction(async (client) => {
       const conversationResult = await client.query(
-        `SELECT id::text, title, model, created_at, updated_at
+        `SELECT id::text, title, model, total_estimated_cost_nanos::text,
+                last_cost_warning_dollars, created_at, updated_at
          FROM chat_conversations WHERE id = $1 FOR UPDATE`,
         [conversationId],
       );
@@ -318,7 +332,8 @@ app.post("/api/chat/conversations/:id/messages", chatRateLimit, async (request, 
         `UPDATE chat_conversations
          SET updated_at = NOW()
          WHERE id = $1
-         RETURNING id::text, title, model, created_at, updated_at`,
+         RETURNING id::text, title, model, total_estimated_cost_nanos::text,
+                   last_cost_warning_dollars, created_at, updated_at`,
         [conversationId],
       );
       return { conversation: updated.rows[0], shouldGenerateTitle };
@@ -330,6 +345,7 @@ app.post("/api/chat/conversations/:id/messages", chatRateLimit, async (request, 
     }
 
     const { conversation, shouldGenerateTitle } = conversationState;
+    const conversationCostBeforeRequest = Number(conversation.total_estimated_cost_nanos);
     const titlePromise = shouldGenerateTitle
       ? generateConversationTitle(input.message).catch((error) => {
           console.error("Claude conversation title generation failed", error instanceof Error
@@ -366,44 +382,95 @@ app.post("/api/chat/conversations/:id/messages", chatRateLimit, async (request, 
         {
           onStage: (stage: ChatStage) => sendChatEvent(response, "stage", { stage }),
           onText: (delta) => sendChatEvent(response, "delta", { delta }),
+          onUsage: (usage) => {
+            const requestCostNanos = calculateEstimatedCostNanos(usage, conversation.model);
+            sendChatEvent(response, "cost", {
+              conversation_id: conversationId,
+              request_cost_nanos: String(requestCostNanos),
+              conversation_cost_nanos: String(conversationCostBeforeRequest + requestCostNanos),
+              final: false,
+            });
+          },
         },
       );
       const generatedTitle = await titlePromise;
+      const usage = addChatUsage(result.usage, generatedTitle?.usage ?? emptyChatUsage());
+      const estimatedCostNanos = calculateEstimatedCostNanos(usage, conversation.model);
+      const pricingSnapshot = sonnet5PricingSnapshot();
 
       const saved = await withTransaction(async (client) => {
         const messageResult = await client.query(
           `INSERT INTO chat_messages (
-             conversation_id, role, content, sources, input_tokens, output_tokens
-           ) VALUES ($1, 'assistant', $2, $3::jsonb, $4, $5)
-           RETURNING id::text, role, content, sources, created_at`,
+             conversation_id, role, content, sources, input_tokens, output_tokens,
+             cache_creation_5m_input_tokens, cache_creation_1h_input_tokens,
+             cache_read_input_tokens, web_search_requests, estimated_cost_nanos,
+             pricing_snapshot
+           ) VALUES ($1, 'assistant', $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+           RETURNING id::text, role, content, sources, input_tokens, output_tokens,
+                     cache_creation_5m_input_tokens, cache_creation_1h_input_tokens,
+                     cache_read_input_tokens, web_search_requests,
+                     estimated_cost_nanos::text, pricing_snapshot, created_at`,
           [
             conversationId,
             result.content,
             JSON.stringify(result.sources),
-            result.inputTokens,
-            result.outputTokens,
+            usage.inputTokens,
+            usage.outputTokens,
+            usage.cacheCreation5mInputTokens,
+            usage.cacheCreation1hInputTokens,
+            usage.cacheReadInputTokens,
+            usage.webSearchRequests,
+            estimatedCostNanos,
+            JSON.stringify(pricingSnapshot),
           ],
         );
-        const conversationResult = generatedTitle
-          ? await client.query(
-              `UPDATE chat_conversations
-               SET title = CASE WHEN title = 'New conversation' THEN $2 ELSE title END,
-                   updated_at = NOW()
-               WHERE id = $1
-               RETURNING id::text, title, model, created_at, updated_at`,
-              [conversationId, generatedTitle],
-            )
-          : await client.query(
-              `UPDATE chat_conversations
-               SET updated_at = NOW()
-               WHERE id = $1
-               RETURNING id::text, title, model, created_at, updated_at`,
-              [conversationId],
-            );
-        return { message: messageResult.rows[0], conversation: conversationResult.rows[0] };
+        const conversationResult = await client.query(
+          `UPDATE chat_conversations
+           SET title = CASE
+                 WHEN $2::text IS NOT NULL AND title = 'New conversation' THEN $2
+                 ELSE title
+               END,
+               total_estimated_cost_nanos = total_estimated_cost_nanos + $3,
+               updated_at = NOW()
+           WHERE id = $1
+           RETURNING id::text, title, model, total_estimated_cost_nanos::text,
+                     last_cost_warning_dollars, created_at, updated_at`,
+          [conversationId, generatedTitle?.title ?? null, estimatedCostNanos],
+        );
+        const updatedConversation = conversationResult.rows[0];
+        const warningThresholds = dollarThresholdsCrossed(
+          Number(updatedConversation.last_cost_warning_dollars) * 1_000_000_000,
+          Number(updatedConversation.total_estimated_cost_nanos),
+        );
+        if (warningThresholds.length) {
+          await client.query(
+            `UPDATE chat_conversations
+             SET last_cost_warning_dollars = $2
+             WHERE id = $1`,
+            [conversationId, warningThresholds.at(-1)],
+          );
+        }
+        return {
+          message: messageResult.rows[0],
+          conversation: updatedConversation,
+          warningThresholds,
+        };
       });
 
-      if (generatedTitle) sendChatEvent(response, "conversation", saved.conversation);
+      sendChatEvent(response, "cost", {
+        conversation_id: conversationId,
+        request_cost_nanos: String(estimatedCostNanos),
+        conversation_cost_nanos: saved.conversation.total_estimated_cost_nanos,
+        final: true,
+      });
+      sendChatEvent(response, "conversation", saved.conversation);
+      if (saved.warningThresholds.length) {
+        sendChatEvent(response, "cost_warning", {
+          thresholds: saved.warningThresholds,
+          threshold_dollars: saved.warningThresholds.at(-1),
+          conversation_cost_nanos: saved.conversation.total_estimated_cost_nanos,
+        });
+      }
       sendChatEvent(response, "sources", { sources: result.sources });
       sendChatEvent(response, "done", { message: saved.message });
       response.end();

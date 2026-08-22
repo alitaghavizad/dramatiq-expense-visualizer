@@ -34,6 +34,7 @@ current context.
 - Manual entry, CSV export, duplicate-receipt protection, and deletion
 - Claude Sonnet 5 expense chat with streamed responses and web citations
 - Durable conversation history that can be reopened and continued
+- Live per-conversation API cost estimates in the top bar and history cards, with a warning at every whole US dollar
 - Constrained read-only ledger tools; the agent has no expense write operation
 - Persistent light/dark themes and English, Armenian, and German UI languages
 - Interactive shape-and-line backgrounds across the dashboard and chat
@@ -58,6 +59,9 @@ The default recognition model is `gemini-3.7-flash`. Override it with
 The default chat model is `claude-sonnet-5`. Override it with `CLAUDE_MODEL`.
 Claude web search runs only when the model determines that current external
 information is useful; Anthropic may charge separately for each web search.
+The chat cost display uses a server-side Sonnet 5 pricing snapshot and includes
+input, output, cache, title-generation, and reported web-search usage. It is an
+estimate; the Anthropic invoice remains authoritative.
 
 ## Run with Docker
 
@@ -229,8 +233,10 @@ Open [http://localhost:3000](http://localhost:3000). The local API listens on
 - extraction confidence and timestamps
 
 `chat_conversations` and `chat_messages` store the conversation list, complete
-user/assistant history, web sources, and token usage. The full prior message
-history is replayed to Claude when a conversation continues.
+user/assistant history, web sources, detailed token usage, pricing snapshots,
+per-message estimates, cumulative conversation cost, and the last displayed
+whole-dollar warning. The full prior message history is replayed to Claude when
+a conversation continues.
 
 The complete idempotent schema is in [`database/schema.sql`](database/schema.sql).
 

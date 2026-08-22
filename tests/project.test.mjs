@@ -20,6 +20,9 @@ test("persists resumable Claude conversations and message memory", async () => {
   assert.match(schema, /conversation_id UUID NOT NULL REFERENCES chat_conversations\(id\) ON DELETE CASCADE/i);
   assert.match(schema, /CHECK \(role IN \('user', 'assistant'\)\)/i);
   assert.match(schema, /sources JSONB NOT NULL/i);
+  assert.match(schema, /total_estimated_cost_nanos BIGINT NOT NULL DEFAULT 0/i);
+  assert.match(schema, /estimated_cost_nanos BIGINT NOT NULL DEFAULT 0/i);
+  assert.match(schema, /pricing_snapshot JSONB NOT NULL DEFAULT '\{\}'::jsonb/i);
 });
 
 test("keeps receipt review between extraction and database save", async () => {
@@ -101,6 +104,8 @@ test("gives Claude read-only ledger tools and live web search", async () => {
   assert.match(agent, /get_spending_breakdown/);
   assert.match(agent, /search_expenses/);
   assert.match(agent, /messages\.stream/);
+  assert.match(agent, /stream\.on\("streamEvent"/);
+  assert.match(agent, /callbacks\.onUsage/);
   assert.match(agent, /generateConversationTitle/);
   assert.match(agent, /output_config: \{ effort: "low" \}/);
   assert.doesNotMatch(agent, /country:\s*"AM"/);
@@ -123,6 +128,10 @@ test("exposes conversation history and streaming chat UI", async () => {
   assert.match(page, /chat\.conversationHistory/);
   assert.match(english, /Conversation history/);
   assert.match(page, /getReader\(\)/);
+  assert.match(page, /createAdaptiveStreamBuffer/);
+  assert.match(page, /streamBuffer\.push\(payload\.delta\)/);
+  assert.match(page, /streamBuffer\.flush\(\)/);
+  assert.doesNotMatch(page, /setStreamText\(\(current\) => current \+ payload\.delta\)/);
   assert.match(page, /ReactMarkdown/);
   assert.match(page, /remarkGfm/);
   assert.match(page, /messageScrollRef/);
@@ -143,8 +152,119 @@ test("exposes conversation history and streaming chat UI", async () => {
   assert.match(ambientGeometry, /Math\.floor\(point\.seed \* 6\)/);
   assert.match(page, /chat\.ledgerReadOnly/);
   assert.match(page, /chat\.liveWeb/);
+  assert.match(page, /chat-cost-badge/);
+  assert.match(page, /conversation-item-meta/);
+  assert.match(page, /cost_warning/);
+  assert.match(api, /event: \$\{event\}/);
+  assert.match(api, /"cost_warning"/);
+  assert.match(api, /calculateEstimatedCostNanos/);
+  assert.match(api, /web_search_requests/);
+  assert.match(chatStyles, /\.chat-cost-warning/);
   assert.match(english, /Ledger · read only/);
   assert.match(english, /Live web/);
+  assert.match(english, /Estimated cumulative Claude API cost/);
+});
+
+test("batches rapid Claude deltas at an adaptive rendering cadence", async () => {
+  const {
+    createAdaptiveStreamBuffer,
+    STREAM_BATCH_SIZE,
+    STREAM_BUSY_THRESHOLD,
+    STREAM_CATCH_UP_THRESHOLD,
+    STREAM_FLUSH_INTERVAL_MS,
+  } = await import(new URL("app/chat/adaptive-stream-buffer.ts", root));
+  const scheduled = new Map();
+  const batches = [];
+  let nextTimerId = 0;
+  const scheduler = {
+    setTimeout(callback, delay) {
+      const id = ++nextTimerId;
+      scheduled.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout(id) {
+      scheduled.delete(id);
+    },
+  };
+  const firstScheduledDelay = () => scheduled.values().next().value?.delay;
+  const runNextTimer = () => {
+    const next = scheduled.entries().next().value;
+    assert.ok(next, "expected a pending stream flush");
+    const [id, task] = next;
+    scheduled.delete(id);
+    task.callback();
+  };
+  const buffer = createAdaptiveStreamBuffer((batch) => batches.push(batch), scheduler);
+
+  buffer.push("Hel");
+  buffer.push("lo");
+  assert.equal(scheduled.size, 1);
+  assert.equal(firstScheduledDelay(), STREAM_FLUSH_INTERVAL_MS.normal);
+  assert.deepEqual(batches, []);
+  runNextTimer();
+  assert.deepEqual(batches, ["Hello"]);
+
+  buffer.push("a");
+  assert.equal(firstScheduledDelay(), STREAM_FLUSH_INTERVAL_MS.normal);
+  buffer.push("x".repeat(STREAM_BUSY_THRESHOLD));
+  assert.equal(scheduled.size, 1);
+  assert.equal(firstScheduledDelay(), STREAM_FLUSH_INTERVAL_MS.busy);
+  runNextTimer();
+  assert.equal(batches.at(-1).length, STREAM_BATCH_SIZE.busy);
+  assert.equal(scheduled.size, 1);
+  while (scheduled.size) runNextTimer();
+  assert.equal(batches.slice(1).join(""), `a${"x".repeat(STREAM_BUSY_THRESHOLD)}`);
+
+  const catchUpText = "z".repeat(STREAM_CATCH_UP_THRESHOLD);
+  const catchUpBatchStart = batches.length;
+  buffer.push(catchUpText);
+  assert.equal(firstScheduledDelay(), STREAM_FLUSH_INTERVAL_MS.busy);
+  runNextTimer();
+  assert.equal(batches.at(-1).length, STREAM_BATCH_SIZE.catchUp);
+  while (scheduled.size) runNextTimer();
+  assert.equal(batches.slice(catchUpBatchStart).join(""), catchUpText);
+
+  buffer.push(" final tail");
+  buffer.flush();
+  assert.equal(scheduled.size, 0);
+  assert.equal(batches.at(-1), " final tail");
+
+  buffer.push("discard this");
+  buffer.reset();
+  assert.equal(scheduled.size, 0);
+  assert.notEqual(batches.at(-1), "discard this");
+
+  buffer.push("dispose this");
+  buffer.dispose();
+  assert.equal(scheduled.size, 0);
+  assert.notEqual(batches.at(-1), "dispose this");
+});
+
+test("copies every completed chat message with localized feedback", async () => {
+  const [page, styles, ...localeFiles] = await Promise.all([
+    readFile(new URL("app/chat/page.tsx", root), "utf8"),
+    readFile(new URL("app/chat/chat.css", root), "utf8"),
+    ...["en", "hy", "de"].map((locale) => readFile(new URL(`app/i18n/locales/${locale}.json`, root), "utf8")),
+  ]);
+  const dictionaries = localeFiles.map(JSON.parse);
+
+  assert.match(page, /navigator\.clipboard\.writeText\(message\.content\)/);
+  assert.match(page, /copiedMessageId === message\.id/);
+  assert.match(page, /className=\{`message-copy-button/);
+  assert.match(page, /aria-label=\{copyLabel\}/);
+  assert.match(page, /title=\{copyLabel\}/);
+  assert.match(page, /setCopiedMessageId\(null\), 1_600/);
+  assert.match(page, /chat\.copyFailed/);
+  assert.match(styles, /\.message-copy-button:focus-visible/);
+  assert.match(styles, /\.message-copy-button\.is-copied/);
+  assert.match(styles, /:root\[data-theme="dark"\] \.message-copy-button/);
+  assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.message-copy-button span \{ display: none/);
+  dictionaries.forEach((dictionary) => {
+    for (const key of ["copy", "copyMessage", "copied", "copyFailed"]) {
+      assert.equal(typeof dictionary.chat[key], "string");
+      assert.ok(dictionary.chat[key].length > 0);
+    }
+  });
 });
 
 test("reuses the animated chat geometry behind the main dashboard", async () => {

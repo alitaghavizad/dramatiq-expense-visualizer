@@ -4,6 +4,9 @@ import {
   ArrowUp,
   BarChart3,
   BookOpenText,
+  Check,
+  CircleDollarSign,
+  Copy,
   Database,
   Globe2,
   LayoutDashboard,
@@ -12,6 +15,7 @@ import {
   Plus,
   Search,
   Sparkles,
+  TriangleAlert,
   WalletCards,
   X,
 } from "lucide-react";
@@ -22,6 +26,7 @@ import remarkGfm from "remark-gfm";
 import { useI18n } from "../i18n/provider";
 import LanguageSwitcher from "../language-switcher";
 import ThemeToggle from "../theme-toggle";
+import { createAdaptiveStreamBuffer } from "./adaptive-stream-buffer";
 import AmbientGeometry from "./ambient-geometry";
 import "./chat.css";
 
@@ -38,6 +43,7 @@ type Conversation = {
   message_count: number;
   last_message: string | null;
   last_message_role?: "user" | "assistant" | null;
+  total_estimated_cost_nanos: string;
 };
 
 type ChatMessage = {
@@ -46,6 +52,7 @@ type ChatMessage = {
   content: string;
   sources: ChatSource[];
   created_at: string;
+  estimated_cost_nanos?: string;
 };
 
 type ChatStage = "thinking" | "database" | "web" | "writing";
@@ -94,6 +101,13 @@ function modelLabel(model: string) {
   return model.replaceAll("-", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function formatEstimatedCost(costNanos: string | number | undefined) {
+  const dollars = Number(costNanos ?? 0) / 1_000_000_000;
+  if (!Number.isFinite(dollars) || dollars < 0) return "$0.0000";
+  const digits = dollars >= 1 ? 2 : 4;
+  return `$${dollars.toFixed(digits)}`;
+}
+
 function ChatMark() {
   return (
     <span className="chat-mark" aria-hidden="true">
@@ -135,10 +149,22 @@ export default function ChatPage() {
   const [streamSources, setStreamSources] = useState<ChatSource[]>([]);
   const [stage, setStage] = useState<ChatStage>("thinking");
   const [error, setError] = useState("");
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
+  const [liveCostNanos, setLiveCostNanos] = useState<string | null>(null);
+  const [costWarningThresholds, setCostWarningThresholds] = useState<number[]>([]);
   const messageScrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [streamBuffer] = useState(() => createAdaptiveStreamBuffer((batch) => {
+    setStreamText((current) => current + batch);
+  }));
+
+  const resetStreamingResponse = useCallback(() => {
+    streamBuffer.reset();
+    setStreamText("");
+    setStreamSources([]);
+  }, [streamBuffer]);
 
   const activeConversation = conversations.find((conversation) => conversation.id === activeId) ?? null;
 
@@ -182,6 +208,14 @@ export default function ChatPage() {
     return () => controller.abort();
   }, [t]);
 
+  useEffect(() => () => streamBuffer.dispose(), [streamBuffer]);
+
+  useEffect(() => {
+    if (!copiedMessageId) return;
+    const timeout = window.setTimeout(() => setCopiedMessageId(null), 1_600);
+    return () => window.clearTimeout(timeout);
+  }, [copiedMessageId]);
+
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
       const scroller = messageScrollRef.current;
@@ -214,6 +248,15 @@ export default function ChatPage() {
     }, {});
   }, [conversationSearch, conversations]);
 
+  async function copyMessage(message: ChatMessage) {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopiedMessageId(message.id);
+    } catch {
+      setError(t("chat.copyFailed"));
+    }
+  }
+
   async function createConversation() {
     const response = await fetch(`${API_BASE}/api/chat/conversations`, {
       method: "POST",
@@ -224,6 +267,8 @@ export default function ChatPage() {
     setConversations((current) => [conversation, ...current]);
     setActiveId(conversation.id);
     setMessages([]);
+    setLiveCostNanos(null);
+    setCostWarningThresholds([]);
     setDrawerOpen(false);
     return conversation;
   }
@@ -255,8 +300,9 @@ export default function ChatPage() {
     setMessages([]);
     setLoadingMessages(true);
     setError("");
-    setStreamText("");
-    setStreamSources([]);
+    setLiveCostNanos(null);
+    setCostWarningThresholds([]);
+    resetStreamingResponse();
     setDrawerOpen(false);
     try {
       const response = await fetch(`${API_BASE}/api/chat/conversations/${id}/messages`);
@@ -278,10 +324,30 @@ export default function ChatPage() {
     } else if (event === "stage" && typeof payload.stage === "string") {
       setStage(payload.stage as ChatStage);
     } else if (event === "delta" && typeof payload.delta === "string") {
-      setStreamText((current) => current + payload.delta);
+      streamBuffer.push(payload.delta);
     } else if (event === "sources" && Array.isArray(payload.sources)) {
       setStreamSources(payload.sources as ChatSource[]);
+    } else if (event === "cost" && typeof payload.conversation_cost_nanos === "string") {
+      const conversationId = typeof payload.conversation_id === "string" ? payload.conversation_id : activeId;
+      const conversationCostNanos = payload.conversation_cost_nanos;
+      setLiveCostNanos(payload.final === true ? null : conversationCostNanos);
+      if (conversationId) {
+        setConversations((current) => current.map((conversation) =>
+          conversation.id === conversationId
+            ? { ...conversation, total_estimated_cost_nanos: conversationCostNanos }
+            : conversation,
+        ));
+      }
+    } else if (event === "cost_warning") {
+      const thresholds = Array.isArray(payload.thresholds)
+        ? payload.thresholds.filter((value): value is number => typeof value === "number")
+        : typeof payload.threshold_dollars === "number" ? [payload.threshold_dollars] : [];
+      setCostWarningThresholds((current) => [
+        ...current,
+        ...thresholds.filter((threshold) => !current.includes(threshold)),
+      ]);
     } else if (event === "done" && payload.message) {
+      streamBuffer.flush();
       setMessages((current) => [...current, payload.message as ChatMessage]);
       setStreamText("");
       setStreamSources([]);
@@ -299,8 +365,9 @@ export default function ChatPage() {
       setSending(true);
       setStage("thinking");
       setError("");
-      setStreamText("");
-      setStreamSources([]);
+      setLiveCostNanos(null);
+      setCostWarningThresholds([]);
+      resetStreamingResponse();
       if (!conversationId) conversationId = (await createConversation()).id;
 
       const optimisticId = `local-${conversationId}-${messages.length}`;
@@ -350,8 +417,7 @@ export default function ChatPage() {
 
       await loadConversations(conversationId);
     } catch (sendError) {
-      setStreamText("");
-      setStreamSources([]);
+      resetStreamingResponse();
       setError(sendError instanceof Error ? sendError.message : t("chat.sendFailed"));
     } finally {
       setSending(false);
@@ -367,6 +433,7 @@ export default function ChatPage() {
   }
 
   const hasConversationContent = loadingMessages || messages.length > 0 || sending;
+  const displayedCostNanos = liveCostNanos ?? activeConversation?.total_estimated_cost_nanos ?? "0";
 
   return (
     <main className="chat-app-shell">
@@ -428,7 +495,10 @@ export default function ChatPage() {
                         <strong>{conversation.title}</strong>
                         <small>{conversation.last_message || t("chat.readyFirstQuestion")}</small>
                       </span>
-                      <time>{timeLabel(conversation.updated_at, intlLocale)}</time>
+                      <span className="conversation-item-meta">
+                        <time>{timeLabel(conversation.updated_at, intlLocale)}</time>
+                        <small title={t("chat.estimatedCostDetail")}>{formatEstimatedCost(conversation.total_estimated_cost_nanos)}</small>
+                      </span>
                     </button>
                   ))}
                 </section>
@@ -462,6 +532,13 @@ export default function ChatPage() {
                 <span><Database size={13} /> {t("chat.ledgerReadOnly")}</span>
                 <span><Globe2 size={13} /> {t("chat.liveWeb")}</span>
               </div>
+              <div className={`chat-cost-badge ${sending ? "is-live" : ""}`} title={t("chat.estimatedCostDetail")}>
+                <CircleDollarSign size={14} aria-hidden="true" />
+                <span>
+                  <strong>{formatEstimatedCost(displayedCostNanos)}</strong>
+                  <small>{sending ? t("chat.liveEstimate") : t("chat.estimatedCost")}</small>
+                </span>
+              </div>
               <LanguageSwitcher className="chat-language-switcher" />
               <ThemeToggle className="chat-theme-toggle" />
               <button
@@ -477,6 +554,18 @@ export default function ChatPage() {
           <div className="chat-canvas">
             <div className="chat-aurora" aria-hidden="true"><span /><span /><span /></div>
             <AmbientGeometry />
+            {costWarningThresholds.length > 0 && (
+              <div className="chat-cost-warning" role="alert">
+                <TriangleAlert size={17} aria-hidden="true" />
+                <span>
+                  <strong>{t("chat.costWarningTitle")}</strong>
+                  {t("chat.costWarningCopy", { amount: `$${costWarningThresholds[0]}` })}
+                </span>
+                <button type="button" onClick={() => setCostWarningThresholds((current) => current.slice(1))} aria-label={t("chat.dismissCostWarning")}>
+                  <X size={14} />
+                </button>
+              </div>
+            )}
             <div ref={messageScrollRef} className={`message-scroll ${hasConversationContent ? "has-messages" : ""}`}>
               {!hasConversationContent ? (
                 <section className="chat-welcome">
@@ -506,32 +595,46 @@ export default function ChatPage() {
                 <div className="message-thread" aria-live="polite">
                   {loadingMessages && !messages.length ? (
                     <div className="thread-loading"><span /><span /><span /></div>
-                  ) : messages.map((message, index) => (
-                    <article
-                      className={`chat-message ${message.role}`}
-                      style={{ "--message-index": Math.min(index, 8) } as React.CSSProperties}
-                      key={message.id}
-                    >
-                      {message.role === "assistant" && <ChatMark />}
-                      <div className="message-body">
-                        <div className="message-meta">
-                          <strong>{message.role === "assistant" ? "Claude" : t("chat.you")}</strong>
-                          <time>{timeLabel(message.created_at, intlLocale)}</time>
-                        </div>
-                        {message.role === "assistant"
-                          ? <AssistantMarkdown content={message.content} />
-                          : <div className="message-content">{message.content}</div>}
-                        {message.sources?.length > 0 && (
-                          <div className="message-sources">
-                            <span><Globe2 size={12} /> {t("chat.sources")}</span>
-                            <div>{message.sources.map((source, sourceIndex) => (
-                              <a href={source.url} target="_blank" rel="noreferrer" key={`${source.url}-${sourceIndex}`}>{sourceIndex + 1}. {source.title}</a>
-                            ))}</div>
+                  ) : messages.map((message, index) => {
+                    const copied = copiedMessageId === message.id;
+                    const copyLabel = copied ? t("chat.copied") : t("chat.copyMessage");
+                    return (
+                      <article
+                        className={`chat-message ${message.role}`}
+                        style={{ "--message-index": Math.min(index, 8) } as React.CSSProperties}
+                        key={message.id}
+                      >
+                        {message.role === "assistant" && <ChatMark />}
+                        <div className="message-body">
+                          <div className="message-meta">
+                            <strong>{message.role === "assistant" ? "Claude" : t("chat.you")}</strong>
+                            <time>{timeLabel(message.created_at, intlLocale)}</time>
+                            <button
+                              className={`message-copy-button ${copied ? "is-copied" : ""}`}
+                              type="button"
+                              onClick={() => void copyMessage(message)}
+                              aria-label={copyLabel}
+                              title={copyLabel}
+                            >
+                              {copied ? <Check size={12} aria-hidden="true" /> : <Copy size={12} aria-hidden="true" />}
+                              <span>{copied ? t("chat.copied") : t("chat.copy")}</span>
+                            </button>
                           </div>
-                        )}
-                      </div>
-                    </article>
-                  ))}
+                          {message.role === "assistant"
+                            ? <AssistantMarkdown content={message.content} />
+                            : <div className="message-content">{message.content}</div>}
+                          {message.sources?.length > 0 && (
+                            <div className="message-sources">
+                              <span><Globe2 size={12} /> {t("chat.sources")}</span>
+                              <div>{message.sources.map((source, sourceIndex) => (
+                                <a href={source.url} target="_blank" rel="noreferrer" key={`${source.url}-${sourceIndex}`}>{sourceIndex + 1}. {source.title}</a>
+                              ))}</div>
+                            </div>
+                          )}
+                        </div>
+                      </article>
+                    );
+                  })}
 
                   {sending && (
                     <article className="chat-message assistant streaming-message">
