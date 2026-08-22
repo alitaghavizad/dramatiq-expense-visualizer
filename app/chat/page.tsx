@@ -22,6 +22,7 @@ import remarkGfm from "remark-gfm";
 import { useI18n } from "../i18n/provider";
 import LanguageSwitcher from "../language-switcher";
 import ThemeToggle from "../theme-toggle";
+import { createAdaptiveStreamBuffer } from "./adaptive-stream-buffer";
 import AmbientGeometry from "./ambient-geometry";
 import "./chat.css";
 
@@ -139,6 +140,15 @@ export default function ChatPage() {
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
   const messageScrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [streamBuffer] = useState(() => createAdaptiveStreamBuffer((batch) => {
+    setStreamText((current) => current + batch);
+  }));
+
+  const resetStreamingResponse = useCallback(() => {
+    streamBuffer.reset();
+    setStreamText("");
+    setStreamSources([]);
+  }, [streamBuffer]);
 
   const activeConversation = conversations.find((conversation) => conversation.id === activeId) ?? null;
 
@@ -181,6 +191,8 @@ export default function ChatPage() {
       });
     return () => controller.abort();
   }, [t]);
+
+  useEffect(() => () => streamBuffer.dispose(), [streamBuffer]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -255,8 +267,7 @@ export default function ChatPage() {
     setMessages([]);
     setLoadingMessages(true);
     setError("");
-    setStreamText("");
-    setStreamSources([]);
+    resetStreamingResponse();
     setDrawerOpen(false);
     try {
       const response = await fetch(`${API_BASE}/api/chat/conversations/${id}/messages`);
@@ -278,10 +289,11 @@ export default function ChatPage() {
     } else if (event === "stage" && typeof payload.stage === "string") {
       setStage(payload.stage as ChatStage);
     } else if (event === "delta" && typeof payload.delta === "string") {
-      setStreamText((current) => current + payload.delta);
+      streamBuffer.push(payload.delta);
     } else if (event === "sources" && Array.isArray(payload.sources)) {
       setStreamSources(payload.sources as ChatSource[]);
     } else if (event === "done" && payload.message) {
+      streamBuffer.flush();
       setMessages((current) => [...current, payload.message as ChatMessage]);
       setStreamText("");
       setStreamSources([]);
@@ -299,8 +311,7 @@ export default function ChatPage() {
       setSending(true);
       setStage("thinking");
       setError("");
-      setStreamText("");
-      setStreamSources([]);
+      resetStreamingResponse();
       if (!conversationId) conversationId = (await createConversation()).id;
 
       const optimisticId = `local-${conversationId}-${messages.length}`;
@@ -350,8 +361,7 @@ export default function ChatPage() {
 
       await loadConversations(conversationId);
     } catch (sendError) {
-      setStreamText("");
-      setStreamSources([]);
+      resetStreamingResponse();
       setError(sendError instanceof Error ? sendError.message : t("chat.sendFailed"));
     } finally {
       setSending(false);

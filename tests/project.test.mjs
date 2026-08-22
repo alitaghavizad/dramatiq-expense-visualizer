@@ -123,6 +123,10 @@ test("exposes conversation history and streaming chat UI", async () => {
   assert.match(page, /chat\.conversationHistory/);
   assert.match(english, /Conversation history/);
   assert.match(page, /getReader\(\)/);
+  assert.match(page, /createAdaptiveStreamBuffer/);
+  assert.match(page, /streamBuffer\.push\(payload\.delta\)/);
+  assert.match(page, /streamBuffer\.flush\(\)/);
+  assert.doesNotMatch(page, /setStreamText\(\(current\) => current \+ payload\.delta\)/);
   assert.match(page, /ReactMarkdown/);
   assert.match(page, /remarkGfm/);
   assert.match(page, /messageScrollRef/);
@@ -145,6 +149,81 @@ test("exposes conversation history and streaming chat UI", async () => {
   assert.match(page, /chat\.liveWeb/);
   assert.match(english, /Ledger · read only/);
   assert.match(english, /Live web/);
+});
+
+test("batches rapid Claude deltas at an adaptive rendering cadence", async () => {
+  const {
+    createAdaptiveStreamBuffer,
+    STREAM_BATCH_SIZE,
+    STREAM_BUSY_THRESHOLD,
+    STREAM_CATCH_UP_THRESHOLD,
+    STREAM_FLUSH_INTERVAL_MS,
+  } = await import(new URL("app/chat/adaptive-stream-buffer.ts", root));
+  const scheduled = new Map();
+  const batches = [];
+  let nextTimerId = 0;
+  const scheduler = {
+    setTimeout(callback, delay) {
+      const id = ++nextTimerId;
+      scheduled.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout(id) {
+      scheduled.delete(id);
+    },
+  };
+  const firstScheduledDelay = () => scheduled.values().next().value?.delay;
+  const runNextTimer = () => {
+    const next = scheduled.entries().next().value;
+    assert.ok(next, "expected a pending stream flush");
+    const [id, task] = next;
+    scheduled.delete(id);
+    task.callback();
+  };
+  const buffer = createAdaptiveStreamBuffer((batch) => batches.push(batch), scheduler);
+
+  buffer.push("Hel");
+  buffer.push("lo");
+  assert.equal(scheduled.size, 1);
+  assert.equal(firstScheduledDelay(), STREAM_FLUSH_INTERVAL_MS.normal);
+  assert.deepEqual(batches, []);
+  runNextTimer();
+  assert.deepEqual(batches, ["Hello"]);
+
+  buffer.push("a");
+  assert.equal(firstScheduledDelay(), STREAM_FLUSH_INTERVAL_MS.normal);
+  buffer.push("x".repeat(STREAM_BUSY_THRESHOLD));
+  assert.equal(scheduled.size, 1);
+  assert.equal(firstScheduledDelay(), STREAM_FLUSH_INTERVAL_MS.busy);
+  runNextTimer();
+  assert.equal(batches.at(-1).length, STREAM_BATCH_SIZE.busy);
+  assert.equal(scheduled.size, 1);
+  while (scheduled.size) runNextTimer();
+  assert.equal(batches.slice(1).join(""), `a${"x".repeat(STREAM_BUSY_THRESHOLD)}`);
+
+  const catchUpText = "z".repeat(STREAM_CATCH_UP_THRESHOLD);
+  const catchUpBatchStart = batches.length;
+  buffer.push(catchUpText);
+  assert.equal(firstScheduledDelay(), STREAM_FLUSH_INTERVAL_MS.busy);
+  runNextTimer();
+  assert.equal(batches.at(-1).length, STREAM_BATCH_SIZE.catchUp);
+  while (scheduled.size) runNextTimer();
+  assert.equal(batches.slice(catchUpBatchStart).join(""), catchUpText);
+
+  buffer.push(" final tail");
+  buffer.flush();
+  assert.equal(scheduled.size, 0);
+  assert.equal(batches.at(-1), " final tail");
+
+  buffer.push("discard this");
+  buffer.reset();
+  assert.equal(scheduled.size, 0);
+  assert.notEqual(batches.at(-1), "discard this");
+
+  buffer.push("dispose this");
+  buffer.dispose();
+  assert.equal(scheduled.size, 0);
+  assert.notEqual(batches.at(-1), "dispose this");
 });
 
 test("reuses the animated chat geometry behind the main dashboard", async () => {
