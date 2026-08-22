@@ -20,6 +20,9 @@ test("persists resumable Claude conversations and message memory", async () => {
   assert.match(schema, /conversation_id UUID NOT NULL REFERENCES chat_conversations\(id\) ON DELETE CASCADE/i);
   assert.match(schema, /CHECK \(role IN \('user', 'assistant'\)\)/i);
   assert.match(schema, /sources JSONB NOT NULL/i);
+  assert.match(schema, /total_estimated_cost_nanos BIGINT NOT NULL DEFAULT 0/i);
+  assert.match(schema, /estimated_cost_nanos BIGINT NOT NULL DEFAULT 0/i);
+  assert.match(schema, /pricing_snapshot JSONB NOT NULL DEFAULT '\{\}'::jsonb/i);
 });
 
 test("keeps receipt review between extraction and database save", async () => {
@@ -101,6 +104,8 @@ test("gives Claude read-only ledger tools and live web search", async () => {
   assert.match(agent, /get_spending_breakdown/);
   assert.match(agent, /search_expenses/);
   assert.match(agent, /messages\.stream/);
+  assert.match(agent, /stream\.on\("streamEvent"/);
+  assert.match(agent, /callbacks\.onUsage/);
   assert.match(agent, /generateConversationTitle/);
   assert.match(agent, /output_config: \{ effort: "low" \}/);
   assert.doesNotMatch(agent, /country:\s*"AM"/);
@@ -147,8 +152,17 @@ test("exposes conversation history and streaming chat UI", async () => {
   assert.match(ambientGeometry, /Math\.floor\(point\.seed \* 6\)/);
   assert.match(page, /chat\.ledgerReadOnly/);
   assert.match(page, /chat\.liveWeb/);
+  assert.match(page, /chat-cost-badge/);
+  assert.match(page, /conversation-item-meta/);
+  assert.match(page, /cost_warning/);
+  assert.match(api, /event: \$\{event\}/);
+  assert.match(api, /"cost_warning"/);
+  assert.match(api, /calculateEstimatedCostNanos/);
+  assert.match(api, /web_search_requests/);
+  assert.match(chatStyles, /\.chat-cost-warning/);
   assert.match(english, /Ledger · read only/);
   assert.match(english, /Live web/);
+  assert.match(english, /Estimated cumulative Claude API cost/);
 });
 
 test("batches rapid Claude deltas at an adaptive rendering cadence", async () => {

@@ -48,8 +48,12 @@ CREATE TABLE IF NOT EXISTS chat_conversations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   title TEXT NOT NULL DEFAULT 'New conversation',
   model TEXT NOT NULL,
+  total_estimated_cost_nanos BIGINT NOT NULL DEFAULT 0,
+  last_cost_warning_dollars INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT chat_conversation_cost_nonnegative CHECK (total_estimated_cost_nanos >= 0),
+  CONSTRAINT chat_conversation_warning_nonnegative CHECK (last_cost_warning_dollars >= 0)
 );
 
 CREATE TABLE IF NOT EXISTS chat_messages (
@@ -60,12 +64,66 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   sources JSONB NOT NULL DEFAULT '[]'::jsonb,
   input_tokens INTEGER,
   output_tokens INTEGER,
+  cache_creation_5m_input_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_1h_input_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+  web_search_requests INTEGER NOT NULL DEFAULT 0,
+  estimated_cost_nanos BIGINT NOT NULL DEFAULT 0,
+  pricing_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT chat_message_role CHECK (role IN ('user', 'assistant')),
   CONSTRAINT chat_message_content_nonempty CHECK (length(btrim(content)) > 0),
   CONSTRAINT chat_message_input_tokens_nonnegative CHECK (input_tokens IS NULL OR input_tokens >= 0),
-  CONSTRAINT chat_message_output_tokens_nonnegative CHECK (output_tokens IS NULL OR output_tokens >= 0)
+  CONSTRAINT chat_message_output_tokens_nonnegative CHECK (output_tokens IS NULL OR output_tokens >= 0),
+  CONSTRAINT chat_message_cache_creation_5m_nonnegative CHECK (cache_creation_5m_input_tokens >= 0),
+  CONSTRAINT chat_message_cache_creation_1h_nonnegative CHECK (cache_creation_1h_input_tokens >= 0),
+  CONSTRAINT chat_message_cache_read_nonnegative CHECK (cache_read_input_tokens >= 0),
+  CONSTRAINT chat_message_web_searches_nonnegative CHECK (web_search_requests >= 0),
+  CONSTRAINT chat_message_cost_nonnegative CHECK (estimated_cost_nanos >= 0)
 );
+
+ALTER TABLE chat_conversations
+  ADD COLUMN IF NOT EXISTS total_estimated_cost_nanos BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS last_cost_warning_dollars INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE chat_messages
+  ADD COLUMN IF NOT EXISTS cache_creation_5m_input_tokens INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS cache_creation_1h_input_tokens INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS web_search_requests INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS estimated_cost_nanos BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS pricing_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+-- Historical messages predate detailed billing capture, so their estimate includes only
+-- the input/output tokens that were stored at the time. New messages retain the full
+-- pricing snapshot and server-tool usage used for their estimate.
+UPDATE chat_messages AS message
+SET estimated_cost_nanos = COALESCE(message.input_tokens, 0)::bigint * 2000
+                           + COALESCE(message.output_tokens, 0)::bigint * 10000,
+    pricing_snapshot = jsonb_build_object(
+      'model', conversation.model,
+      'currency', 'USD',
+      'effectiveDate', '2026-08-22',
+      'inputPerMillionTokens', 2,
+      'outputPerMillionTokens', 10,
+      'legacyTokenOnlyEstimate', true
+    )
+FROM chat_conversations AS conversation
+WHERE message.conversation_id = conversation.id
+  AND conversation.model = 'claude-sonnet-5'
+  AND message.role = 'assistant'
+  AND message.estimated_cost_nanos = 0
+  AND (COALESCE(message.input_tokens, 0) > 0 OR COALESCE(message.output_tokens, 0) > 0);
+
+UPDATE chat_conversations AS conversation
+SET total_estimated_cost_nanos = message_cost.total_estimated_cost_nanos
+FROM (
+  SELECT conversation_id, COALESCE(SUM(estimated_cost_nanos), 0)::bigint AS total_estimated_cost_nanos
+  FROM chat_messages
+  GROUP BY conversation_id
+) AS message_cost
+WHERE conversation.id = message_cost.conversation_id
+  AND conversation.total_estimated_cost_nanos IS DISTINCT FROM message_cost.total_estimated_cost_nanos;
 
 CREATE INDEX IF NOT EXISTS chat_conversations_updated_at_idx
   ON chat_conversations (updated_at DESC);
