@@ -13,11 +13,15 @@ current context.
 
 ### Dashboard overview
 
-![Dramatiq dashboard with date filters, spending summaries, a timeline, and category breakdown](docs/images/main.jpg)
+![Dramatiq dashboard with the animated geometry background, date filters, spending summaries, timeline, and category breakdown](docs/images/main.jpg)
 
-### Receipt capture and purchase ledger
+### Receipt capture and sortable purchase ledger
 
-![Dramatiq receipt capture, top stores, and purchase ledger with Armenian and English item names](docs/images/secondary.jpg)
+![Dramatiq receipt capture, top stores, and sortable purchase ledger with Armenian and English item names](docs/images/secondary.jpg)
+
+### Claude expense chat
+
+![Dramatiq Claude chat with conversation history, read-only ledger access, live web capability, animated background, and a rendered expense table](docs/images/chat.jpg)
 
 ## Features
 
@@ -25,11 +29,14 @@ current context.
 - Review-before-save workflow—AI output is never inserted automatically
 - One normalized PostgreSQL row per purchased item
 - Date, category, store, price, and Armenian/English text filters
+- Sortable expense columns with accessible ascending and descending controls
 - Daily spending, category mix, top-store insights, and purchase ledger
 - Manual entry, CSV export, duplicate-receipt protection, and deletion
 - Claude Sonnet 5 expense chat with streamed responses and web citations
 - Durable conversation history that can be reopened and continued
 - Constrained read-only ledger tools; the agent has no expense write operation
+- Persistent light/dark themes and English, Armenian, and German UI languages
+- Interactive shape-and-line backgrounds across the dashboard and chat
 - Responsive desktop and mobile interface
 
 Receipt images are processed in memory and are not stored by the application.
