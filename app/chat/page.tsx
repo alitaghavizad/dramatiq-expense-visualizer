@@ -4,6 +4,8 @@ import {
   ArrowUp,
   BarChart3,
   BookOpenText,
+  Check,
+  Copy,
   Database,
   Globe2,
   LayoutDashboard,
@@ -136,6 +138,7 @@ export default function ChatPage() {
   const [streamSources, setStreamSources] = useState<ChatSource[]>([]);
   const [stage, setStage] = useState<ChatStage>("thinking");
   const [error, setError] = useState("");
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
   const messageScrollRef = useRef<HTMLDivElement>(null);
@@ -195,6 +198,12 @@ export default function ChatPage() {
   useEffect(() => () => streamBuffer.dispose(), [streamBuffer]);
 
   useEffect(() => {
+    if (!copiedMessageId) return;
+    const timeout = window.setTimeout(() => setCopiedMessageId(null), 1_600);
+    return () => window.clearTimeout(timeout);
+  }, [copiedMessageId]);
+
+  useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
       const scroller = messageScrollRef.current;
       if (!scroller) return;
@@ -225,6 +234,15 @@ export default function ChatPage() {
       return groups;
     }, {});
   }, [conversationSearch, conversations]);
+
+  async function copyMessage(message: ChatMessage) {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopiedMessageId(message.id);
+    } catch {
+      setError(t("chat.copyFailed"));
+    }
+  }
 
   async function createConversation() {
     const response = await fetch(`${API_BASE}/api/chat/conversations`, {
@@ -516,32 +534,46 @@ export default function ChatPage() {
                 <div className="message-thread" aria-live="polite">
                   {loadingMessages && !messages.length ? (
                     <div className="thread-loading"><span /><span /><span /></div>
-                  ) : messages.map((message, index) => (
-                    <article
-                      className={`chat-message ${message.role}`}
-                      style={{ "--message-index": Math.min(index, 8) } as React.CSSProperties}
-                      key={message.id}
-                    >
-                      {message.role === "assistant" && <ChatMark />}
-                      <div className="message-body">
-                        <div className="message-meta">
-                          <strong>{message.role === "assistant" ? "Claude" : t("chat.you")}</strong>
-                          <time>{timeLabel(message.created_at, intlLocale)}</time>
-                        </div>
-                        {message.role === "assistant"
-                          ? <AssistantMarkdown content={message.content} />
-                          : <div className="message-content">{message.content}</div>}
-                        {message.sources?.length > 0 && (
-                          <div className="message-sources">
-                            <span><Globe2 size={12} /> {t("chat.sources")}</span>
-                            <div>{message.sources.map((source, sourceIndex) => (
-                              <a href={source.url} target="_blank" rel="noreferrer" key={`${source.url}-${sourceIndex}`}>{sourceIndex + 1}. {source.title}</a>
-                            ))}</div>
+                  ) : messages.map((message, index) => {
+                    const copied = copiedMessageId === message.id;
+                    const copyLabel = copied ? t("chat.copied") : t("chat.copyMessage");
+                    return (
+                      <article
+                        className={`chat-message ${message.role}`}
+                        style={{ "--message-index": Math.min(index, 8) } as React.CSSProperties}
+                        key={message.id}
+                      >
+                        {message.role === "assistant" && <ChatMark />}
+                        <div className="message-body">
+                          <div className="message-meta">
+                            <strong>{message.role === "assistant" ? "Claude" : t("chat.you")}</strong>
+                            <time>{timeLabel(message.created_at, intlLocale)}</time>
+                            <button
+                              className={`message-copy-button ${copied ? "is-copied" : ""}`}
+                              type="button"
+                              onClick={() => void copyMessage(message)}
+                              aria-label={copyLabel}
+                              title={copyLabel}
+                            >
+                              {copied ? <Check size={12} aria-hidden="true" /> : <Copy size={12} aria-hidden="true" />}
+                              <span>{copied ? t("chat.copied") : t("chat.copy")}</span>
+                            </button>
                           </div>
-                        )}
-                      </div>
-                    </article>
-                  ))}
+                          {message.role === "assistant"
+                            ? <AssistantMarkdown content={message.content} />
+                            : <div className="message-content">{message.content}</div>}
+                          {message.sources?.length > 0 && (
+                            <div className="message-sources">
+                              <span><Globe2 size={12} /> {t("chat.sources")}</span>
+                              <div>{message.sources.map((source, sourceIndex) => (
+                                <a href={source.url} target="_blank" rel="noreferrer" key={`${source.url}-${sourceIndex}`}>{sourceIndex + 1}. {source.title}</a>
+                              ))}</div>
+                            </div>
+                          )}
+                        </div>
+                      </article>
+                    );
+                  })}
 
                   {sending && (
                     <article className="chat-message assistant streaming-message">

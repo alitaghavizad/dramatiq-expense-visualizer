@@ -175,6 +175,10 @@
       "live": { "eyebrow": "Live research", "title": "Are my grocery prices typical?", "prompt": "Search the web for current grocery prices in Yerevan and compare them with my recent purchases." }
     },
     "you": "You",
+    "copy": "Copy",
+    "copyMessage": "Copy message",
+    "copied": "Copied",
+    "copyFailed": "Could not copy the message.",
     "sources": "Sources",
     "live": "Live",
     "sourcesFound": "Sources found",

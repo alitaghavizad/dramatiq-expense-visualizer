@@ -175,6 +175,10 @@
       "live": { "eyebrow": "Live-Recherche", "title": "Sind meine Lebensmittelpreise üblich?", "prompt": "Durchsuche das Web nach aktuellen Lebensmittelpreisen in Jerewan und vergleiche sie mit meinen letzten Einkäufen." }
     },
     "you": "Du",
+    "copy": "Kopieren",
+    "copyMessage": "Nachricht kopieren",
+    "copied": "Kopiert",
+    "copyFailed": "Die Nachricht konnte nicht kopiert werden.",
     "sources": "Quellen",
     "live": "Live",
     "sourcesFound": "Quellen gefunden",

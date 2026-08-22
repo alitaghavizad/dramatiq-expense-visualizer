@@ -226,6 +226,33 @@ test("batches rapid Claude deltas at an adaptive rendering cadence", async () =>
   assert.notEqual(batches.at(-1), "dispose this");
 });
 
+test("copies every completed chat message with localized feedback", async () => {
+  const [page, styles, ...localeFiles] = await Promise.all([
+    readFile(new URL("app/chat/page.tsx", root), "utf8"),
+    readFile(new URL("app/chat/chat.css", root), "utf8"),
+    ...["en", "hy", "de"].map((locale) => readFile(new URL(`app/i18n/locales/${locale}.json`, root), "utf8")),
+  ]);
+  const dictionaries = localeFiles.map(JSON.parse);
+
+  assert.match(page, /navigator\.clipboard\.writeText\(message\.content\)/);
+  assert.match(page, /copiedMessageId === message\.id/);
+  assert.match(page, /className=\{`message-copy-button/);
+  assert.match(page, /aria-label=\{copyLabel\}/);
+  assert.match(page, /title=\{copyLabel\}/);
+  assert.match(page, /setCopiedMessageId\(null\), 1_600/);
+  assert.match(page, /chat\.copyFailed/);
+  assert.match(styles, /\.message-copy-button:focus-visible/);
+  assert.match(styles, /\.message-copy-button\.is-copied/);
+  assert.match(styles, /:root\[data-theme="dark"\] \.message-copy-button/);
+  assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.message-copy-button span \{ display: none/);
+  dictionaries.forEach((dictionary) => {
+    for (const key of ["copy", "copyMessage", "copied", "copyFailed"]) {
+      assert.equal(typeof dictionary.chat[key], "string");
+      assert.ok(dictionary.chat[key].length > 0);
+    }
+  });
+});
+
 test("reuses the animated chat geometry behind the main dashboard", async () => {
   const [dashboard, styles, ambientGeometry] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
