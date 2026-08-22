@@ -19,6 +19,9 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useI18n } from "../i18n/provider";
+import LanguageSwitcher from "../language-switcher";
+import ThemeToggle from "../theme-toggle";
 import AmbientGeometry from "./ambient-geometry";
 import "./chat.css";
 
@@ -50,43 +53,30 @@ type ChatStage = "thinking" | "database" | "web" | "writing";
 const suggestions = [
   {
     icon: BarChart3,
-    eyebrow: "This month",
-    title: "Where did most of my money go?",
-    prompt: "Analyze this month's spending and tell me the three most important patterns.",
+    key: "patterns",
   },
   {
     icon: Database,
-    eyebrow: "My ledger",
-    title: "Compare grocery stores",
-    prompt: "Compare my grocery spending by store and highlight where I tend to spend the most.",
+    key: "stores",
   },
   {
     icon: Globe2,
-    eyebrow: "Live search",
-    title: "Check today’s AMD exchange rate",
-    prompt: "Search the web for today's AMD to USD exchange rate and put my recent spending in context.",
+    key: "live",
   },
 ] as const;
 
-const stageLabels: Record<ChatStage, string> = {
-  thinking: "Thinking through your question",
-  database: "Reading your ledger securely",
-  web: "Checking live sources",
-  writing: "Composing your answer",
-};
-
-async function readJson(response: Response) {
+async function readJson(response: Response, fallback: string) {
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error ?? "The request could not be completed.");
+  if (!response.ok) throw new Error(payload.error ?? fallback);
   return payload;
 }
 
-function timeLabel(value: string) {
+function timeLabel(value: string, locale: string) {
   const date = new Date(value);
   const today = new Date();
   const sameDay = date.toDateString() === today.toDateString();
-  if (sameDay) return new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit" }).format(date);
-  return new Intl.DateTimeFormat("en", { month: "short", day: "numeric" }).format(date);
+  if (sameDay) return new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit" }).format(date);
+  return new Intl.DateTimeFormat(locale, { month: "short", day: "numeric" }).format(date);
 }
 
 function conversationGroup(value: string) {
@@ -94,9 +84,9 @@ function conversationGroup(value: string) {
   const now = new Date();
   const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const day = 86_400_000;
-  if (date.getTime() >= startToday) return "Today";
-  if (date.getTime() >= startToday - 7 * day) return "Previous 7 days";
-  return "Earlier";
+  if (date.getTime() >= startToday) return "today";
+  if (date.getTime() >= startToday - 7 * day) return "previousWeek";
+  return "earlier";
 }
 
 function modelLabel(model: string) {
@@ -132,6 +122,7 @@ function AssistantMarkdown({ content, streaming = false }: { content: string; st
 }
 
 export default function ChatPage() {
+  const { intlLocale, t } = useI18n();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -154,22 +145,22 @@ export default function ChatPage() {
   const loadConversations = useCallback(async (preferredId: string | null) => {
     try {
       const response = await fetch(`${API_BASE}/api/chat/conversations`);
-      const payload = await readJson(response) as { conversations: Conversation[] };
+      const payload = await readJson(response, t("common.requestFailed")) as { conversations: Conversation[] };
       setConversations(payload.conversations);
       if (preferredId && payload.conversations.some((conversation) => conversation.id === preferredId)) {
         setActiveId(preferredId);
       }
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Could not load conversations.");
+      setError(loadError instanceof Error ? loadError.message : t("chat.loadFailed"));
     } finally {
       setLoadingConversations(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     const controller = new AbortController();
     fetch(`${API_BASE}/api/chat/conversations`, { signal: controller.signal })
-      .then(readJson)
+      .then((response) => readJson(response, t("common.requestFailed")))
       .then(async (payload: { conversations: Conversation[] }) => {
         setConversations(payload.conversations);
         const first = payload.conversations[0];
@@ -177,19 +168,19 @@ export default function ChatPage() {
         setActiveId(first.id);
         setLoadingMessages(true);
         const messageResponse = await fetch(`${API_BASE}/api/chat/conversations/${first.id}/messages`, { signal: controller.signal });
-        const messagePayload = await readJson(messageResponse) as { messages: ChatMessage[] };
+        const messagePayload = await readJson(messageResponse, t("common.requestFailed")) as { messages: ChatMessage[] };
         setMessages(messagePayload.messages);
       })
       .catch((loadError) => {
         if (loadError instanceof DOMException && loadError.name === "AbortError") return;
-        setError(loadError instanceof Error ? loadError.message : "Could not load conversations.");
+        setError(loadError instanceof Error ? loadError.message : t("chat.loadFailed"));
       })
       .finally(() => {
         setLoadingConversations(false);
         setLoadingMessages(false);
       });
     return () => controller.abort();
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -229,7 +220,7 @@ export default function ChatPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
-    const conversation = await readJson(response) as Conversation;
+    const conversation = await readJson(response, t("common.requestFailed")) as Conversation;
     setConversations((current) => [conversation, ...current]);
     setActiveId(conversation.id);
     setMessages([]);
@@ -244,7 +235,7 @@ export default function ChatPage() {
       await createConversation();
       window.setTimeout(() => textareaRef.current?.focus(), 50);
     } catch (createError) {
-      setError(createError instanceof Error ? createError.message : "Could not start a conversation.");
+      setError(createError instanceof Error ? createError.message : t("chat.startFailed"));
     }
   }
 
@@ -269,10 +260,10 @@ export default function ChatPage() {
     setDrawerOpen(false);
     try {
       const response = await fetch(`${API_BASE}/api/chat/conversations/${id}/messages`);
-      const payload = await readJson(response) as { messages: ChatMessage[] };
+      const payload = await readJson(response, t("common.requestFailed")) as { messages: ChatMessage[] };
       setMessages(payload.messages);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Could not load this conversation.");
+      setError(loadError instanceof Error ? loadError.message : t("chat.conversationLoadFailed"));
     } finally {
       setLoadingMessages(false);
     }
@@ -295,7 +286,7 @@ export default function ChatPage() {
       setStreamText("");
       setStreamSources([]);
     } else if (event === "error") {
-      throw new Error(typeof payload.error === "string" ? payload.error : "Claude could not answer.");
+      throw new Error(typeof payload.error === "string" ? payload.error : t("chat.claudeFailed"));
     }
   }
 
@@ -330,7 +321,7 @@ export default function ChatPage() {
       });
       if (!response.ok || !response.body) {
         setMessages((current) => current.filter((item) => item.id !== optimisticId));
-        await readJson(response);
+        await readJson(response, t("common.requestFailed"));
         return;
       }
 
@@ -361,7 +352,7 @@ export default function ChatPage() {
     } catch (sendError) {
       setStreamText("");
       setStreamSources([]);
-      setError(sendError instanceof Error ? sendError.message : "The message could not be sent.");
+      setError(sendError instanceof Error ? sendError.message : t("chat.sendFailed"));
     } finally {
       setSending(false);
       window.setTimeout(() => textareaRef.current?.focus(), 50);
@@ -380,47 +371,47 @@ export default function ChatPage() {
   return (
     <main className="chat-app-shell">
       <aside className="sidebar chat-primary-sidebar">
-        <Link className="brand-mark" href="/" aria-label="Dramatiq home">Դ</Link>
-        <nav aria-label="Main navigation">
-          <Link className="nav-item" href="/" aria-label="Overview"><LayoutDashboard size={19} /></Link>
-          <Link className="nav-item" href="/#insights" aria-label="Insights"><BarChart3 size={19} /></Link>
-          <Link className="nav-item" href="/#purchases" aria-label="Purchases"><WalletCards size={19} /></Link>
-          <Link className="nav-item active" href="/chat" aria-label="Claude chat"><MessageCircleMore size={19} /></Link>
+        <Link className="brand-mark" href="/" aria-label={t("common.brandHome")}>Դ</Link>
+        <nav aria-label={t("common.mainNavigation")}>
+          <Link className="nav-item" href="/" aria-label={t("common.overview")}><LayoutDashboard size={19} /></Link>
+          <Link className="nav-item" href="/#insights" aria-label={t("common.insights")}><BarChart3 size={19} /></Link>
+          <Link className="nav-item" href="/#purchases" aria-label={t("common.purchases")}><WalletCards size={19} /></Link>
+          <Link className="nav-item active" href="/chat" aria-label={t("common.claudeChat")}><MessageCircleMore size={19} /></Link>
         </nav>
-        <button className="sidebar-add" type="button" onClick={() => void beginNewConversation()} aria-label="New conversation"><Plus size={19} /></button>
+        <button className="sidebar-add" type="button" onClick={() => void beginNewConversation()} aria-label={t("chat.newConversation")}><Plus size={19} /></button>
         <div className="user-badge">AM</div>
       </aside>
 
       <div className="chat-workbench">
-        {drawerOpen && <button className="chat-drawer-scrim" type="button" aria-label="Close conversations" onClick={() => setDrawerOpen(false)} />}
-        <aside className={`conversation-rail ${drawerOpen ? "is-open" : ""} ${historyCollapsed ? "is-collapsed" : ""}`} aria-label="Conversation history">
+        {drawerOpen && <button className="chat-drawer-scrim" type="button" aria-label={t("chat.closeConversations")} onClick={() => setDrawerOpen(false)} />}
+        <aside className={`conversation-rail ${drawerOpen ? "is-open" : ""} ${historyCollapsed ? "is-collapsed" : ""}`} aria-label={t("chat.conversationHistory")}>
           <div className="rail-heading">
             <div>
               <span className="rail-kicker">Dramatiq AI</span>
-              <strong>Conversations</strong>
+              <strong>{t("chat.conversations")}</strong>
             </div>
-            <button className="rail-close" type="button" onClick={closeConversationHistory} aria-label="Close conversation history"><X size={17} /></button>
+            <button className="rail-close" type="button" onClick={closeConversationHistory} aria-label={t("chat.closeHistory")}><X size={17} /></button>
           </div>
 
           <button className="new-chat-button" type="button" onClick={() => void beginNewConversation()} disabled={sending}>
             <span><Plus size={16} /></span>
-            New conversation
+            {t("chat.newConversation")}
           </button>
 
           <label className="conversation-search">
             <Search size={14} />
-            <input value={conversationSearch} onChange={(event) => setConversationSearch(event.target.value)} placeholder="Search conversations" aria-label="Search conversations" />
+            <input value={conversationSearch} onChange={(event) => setConversationSearch(event.target.value)} placeholder={t("chat.searchConversations")} aria-label={t("chat.searchConversations")} />
           </label>
 
           <div className="conversation-list">
             {loadingConversations ? (
-              <div className="conversation-skeletons" aria-label="Loading conversations">
+              <div className="conversation-skeletons" aria-label={t("chat.loadingConversations")}>
                 <span /><span /><span />
               </div>
             ) : Object.keys(groupedConversations).length ? (
-              ["Today", "Previous 7 days", "Earlier"].map((group) => groupedConversations[group]?.length ? (
+              ["today", "previousWeek", "earlier"].map((group) => groupedConversations[group]?.length ? (
                 <section className="conversation-group" key={group}>
-                  <p>{group}</p>
+                  <p>{t(`chat.${group}`)}</p>
                   {groupedConversations[group].map((conversation, index) => (
                     <button
                       className={`conversation-item ${conversation.id === activeId ? "active" : ""}`}
@@ -428,16 +419,16 @@ export default function ChatPage() {
                       type="button"
                       key={conversation.id}
                       title={conversation.title}
-                      aria-label={`Open conversation: ${conversation.title}`}
+                      aria-label={t("chat.openConversation", { title: conversation.title })}
                       onClick={() => void openConversation(conversation.id)}
                       disabled={sending && conversation.id !== activeId}
                     >
                       <span className="conversation-item-icon"><MessageCircleMore size={14} /></span>
                       <span className="conversation-item-copy">
                         <strong>{conversation.title}</strong>
-                        <small>{conversation.last_message || "Ready for your first question"}</small>
+                        <small>{conversation.last_message || t("chat.readyFirstQuestion")}</small>
                       </span>
-                      <time>{timeLabel(conversation.updated_at)}</time>
+                      <time>{timeLabel(conversation.updated_at, intlLocale)}</time>
                     </button>
                   ))}
                 </section>
@@ -445,15 +436,15 @@ export default function ChatPage() {
             ) : (
               <div className="conversation-empty">
                 <BookOpenText size={22} />
-                <strong>No conversations yet</strong>
-                <span>Your questions and answers will stay here.</span>
+                <strong>{t("chat.noConversations")}</strong>
+                <span>{t("chat.historyEmpty")}</span>
               </div>
             )}
           </div>
 
           <div className="rail-privacy-note">
             <Database size={14} />
-            <span><strong>Read-only ledger</strong>Claude can analyze your records, never change them.</span>
+            <span><strong>{t("chat.readOnlyLedger")}</strong>{t("chat.privacyNote")}</span>
           </div>
         </aside>
 
@@ -462,21 +453,23 @@ export default function ChatPage() {
             <div className="chat-topbar-left">
               <ChatMark />
               <div>
-                <strong title={activeConversation?.title || "Expense intelligence"}>{activeConversation?.title || "Expense intelligence"}</strong>
+                <strong title={activeConversation?.title || t("chat.expenseIntelligence")}>{activeConversation?.title || t("chat.expenseIntelligence")}</strong>
                 <span><i /> {activeConversation ? modelLabel(activeConversation.model) : "Claude Sonnet 5"}</span>
               </div>
             </div>
             <div className="chat-topbar-actions">
-              <div className="capability-badges" aria-label="Agent capabilities">
-                <span><Database size={13} /> Ledger · read only</span>
-                <span><Globe2 size={13} /> Live web</span>
+              <div className="capability-badges" aria-label={t("chat.agentCapabilities")}>
+                <span><Database size={13} /> {t("chat.ledgerReadOnly")}</span>
+                <span><Globe2 size={13} /> {t("chat.liveWeb")}</span>
               </div>
+              <LanguageSwitcher className="chat-language-switcher" />
+              <ThemeToggle className="chat-theme-toggle" />
               <button
                 className="rail-menu"
                 type="button"
                 onClick={toggleConversationHistory}
-                aria-label="Toggle conversation history"
-                title="Toggle conversation history"
+                aria-label={t("chat.toggleHistory")}
+                title={t("chat.toggleHistory")}
               ><PanelRight size={18} /></button>
             </div>
           </header>
@@ -488,21 +481,21 @@ export default function ChatPage() {
               {!hasConversationContent ? (
                 <section className="chat-welcome">
                   <div className="welcome-orb"><ChatMark /><span className="orb-ring ring-one" /><span className="orb-ring ring-two" /></div>
-                  <p className="welcome-kicker"><Sparkles size={13} /> Your private expense intelligence</p>
-                  <h1>Ask your spending<br /><em>anything.</em></h1>
-                  <p className="welcome-copy">Claude can read your reviewed expense ledger, spot patterns across time and stores, and search the live web when your question needs today’s context.</p>
+                  <p className="welcome-kicker"><Sparkles size={13} /> {t("chat.welcomeKicker")}</p>
+                  <h1>{t("chat.welcomeTitle")}<br /><em>{t("chat.welcomeEmphasis")}</em></h1>
+                  <p className="welcome-copy">{t("chat.welcomeCopy")}</p>
                   <div className="prompt-suggestions">
                     {suggestions.map((suggestion, index) => {
                       const Icon = suggestion.icon;
                       return (
                         <button
                           type="button"
-                          key={suggestion.title}
+                          key={suggestion.key}
                           style={{ "--suggestion-index": index } as React.CSSProperties}
-                          onClick={() => void sendMessage(suggestion.prompt)}
+                          onClick={() => void sendMessage(t(`chat.suggestions.${suggestion.key}.prompt`))}
                         >
                           <span className="suggestion-icon"><Icon size={16} /></span>
-                          <span><small>{suggestion.eyebrow}</small><strong>{suggestion.title}</strong></span>
+                          <span><small>{t(`chat.suggestions.${suggestion.key}.eyebrow`)}</small><strong>{t(`chat.suggestions.${suggestion.key}.title`)}</strong></span>
                           <ArrowUp size={15} />
                         </button>
                       );
@@ -522,15 +515,15 @@ export default function ChatPage() {
                       {message.role === "assistant" && <ChatMark />}
                       <div className="message-body">
                         <div className="message-meta">
-                          <strong>{message.role === "assistant" ? "Claude" : "You"}</strong>
-                          <time>{timeLabel(message.created_at)}</time>
+                          <strong>{message.role === "assistant" ? "Claude" : t("chat.you")}</strong>
+                          <time>{timeLabel(message.created_at, intlLocale)}</time>
                         </div>
                         {message.role === "assistant"
                           ? <AssistantMarkdown content={message.content} />
                           : <div className="message-content">{message.content}</div>}
                         {message.sources?.length > 0 && (
                           <div className="message-sources">
-                            <span><Globe2 size={12} /> Sources</span>
+                            <span><Globe2 size={12} /> {t("chat.sources")}</span>
                             <div>{message.sources.map((source, sourceIndex) => (
                               <a href={source.url} target="_blank" rel="noreferrer" key={`${source.url}-${sourceIndex}`}>{sourceIndex + 1}. {source.title}</a>
                             ))}</div>
@@ -544,15 +537,15 @@ export default function ChatPage() {
                     <article className="chat-message assistant streaming-message">
                       <ChatMark />
                       <div className="message-body">
-                        <div className="message-meta"><strong>Claude</strong><span className="live-label">Live</span></div>
+                        <div className="message-meta"><strong>Claude</strong><span className="live-label">{t("chat.live")}</span></div>
                         {streamText ? <AssistantMarkdown content={streamText} streaming /> : (
                           <div className="agent-thinking">
                             <span className="thinking-pulse"><i /><i /><i /></span>
-                            <span>{stageLabels[stage]}</span>
+                            <span>{t(`chat.stages.${stage === "writing" ? "responding" : stage}`)}</span>
                           </div>
                         )}
                         {streamSources.length > 0 && (
-                          <div className="message-sources"><span><Globe2 size={12} /> Sources found</span></div>
+                          <div className="message-sources"><span><Globe2 size={12} /> {t("chat.sourcesFound")}</span></div>
                         )}
                       </div>
                     </article>
@@ -562,25 +555,25 @@ export default function ChatPage() {
             </div>
 
             <div className="composer-dock">
-              {error && <div className="chat-error" role="alert"><span>{error}</span><button type="button" onClick={() => setError("")} aria-label="Dismiss error"><X size={15} /></button></div>}
+              {error && <div className="chat-error" role="alert"><span>{error}</span><button type="button" onClick={() => setError("")} aria-label={t("chat.dismissError")}><X size={15} /></button></div>}
               <div className={`chat-composer ${sending ? "is-sending" : ""}`}>
                 <textarea
                   ref={textareaRef}
                   value={draft}
                   onChange={(event) => setDraft(event.target.value)}
                   onKeyDown={handleComposerKeyDown}
-                  placeholder="Ask about your spending or something live…"
-                  aria-label="Message Claude"
+                  placeholder={t("chat.composerPlaceholder")}
+                  aria-label={t("chat.messageClaude")}
                   rows={1}
                   disabled={sending}
                 />
                 <div className="composer-footer">
-                  <div><span><Database size={12} /> Ledger</span><span><Globe2 size={12} /> Web</span></div>
-                  <span className="composer-hint">Shift + Enter for a new line</span>
-                  <button type="button" onClick={() => void sendMessage()} disabled={!draft.trim() || sending} aria-label="Send message"><ArrowUp size={17} /></button>
+                  <div><span><Database size={12} /> {t("chat.ledger")}</span><span><Globe2 size={12} /> {t("chat.web")}</span></div>
+                  <span className="composer-hint">{t("chat.newLineHint")}</span>
+                  <button type="button" onClick={() => void sendMessage()} disabled={!draft.trim() || sending} aria-label={t("chat.sendMessage")}><ArrowUp size={17} /></button>
                 </div>
               </div>
-              <p className="chat-disclaimer">Claude can make mistakes. Verify important financial decisions.</p>
+              <p className="chat-disclaimer">{t("chat.disclaimer")}</p>
             </div>
           </div>
         </section>

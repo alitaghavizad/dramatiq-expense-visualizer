@@ -23,15 +23,55 @@ test("persists resumable Claude conversations and message memory", async () => {
 });
 
 test("keeps receipt review between extraction and database save", async () => {
-  const [page, api] = await Promise.all([
+  const [page, api, english] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
     readFile(new URL("server/index.ts", root), "utf8"),
+    readFile(new URL("app/i18n/locales/en.json", root), "utf8"),
   ]);
-  assert.match(page, /Review every line/);
+  assert.match(page, /dashboard\.reviewEveryLine/);
+  assert.match(english, /Review every line/);
   assert.match(page, /\/api\/receipts\/extract/);
   assert.match(page, /\/api\/receipts/);
   assert.match(api, /withTransaction/);
   assert.match(api, /INSERT INTO expenses/);
+});
+
+test("sorts the main expense table with accessible type-aware controls", async () => {
+  const [page, styles] = await Promise.all([
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("app/globals.css", root), "utf8"),
+  ]);
+  assert.match(page, /type ExpenseSortKey = "item" \| "category" \| "store" \| "date" \| "price"/);
+  assert.match(page, /function compareExpenses/);
+  assert.match(page, /left\.total_price - right\.total_price/);
+  assert.match(page, /left\.purchase_date\.localeCompare\(right\.purchase_date\)/);
+  assert.match(page, /const sortedExpenses = useMemo/);
+  assert.match(page, /aria-sort=/);
+  assert.match(page, /sortedExpenses\.map/);
+  assert.match(styles, /\.sort-button\.is-active/);
+});
+
+test("provides a persistent system-aware dark theme across dashboard and chat", async () => {
+  const [layout, page, chatPage, toggle, styles, chatStyles, ambientGeometry] = await Promise.all([
+    readFile(new URL("app/layout.tsx", root), "utf8"),
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("app/chat/page.tsx", root), "utf8"),
+    readFile(new URL("app/theme-toggle.tsx", root), "utf8"),
+    readFile(new URL("app/globals.css", root), "utf8"),
+    readFile(new URL("app/chat/chat.css", root), "utf8"),
+    readFile(new URL("app/chat/ambient-geometry.tsx", root), "utf8"),
+  ]);
+  assert.match(layout, /suppressHydrationWarning/);
+  assert.match(layout, /const preferenceBootstrap/);
+  assert.match(page, /<ThemeToggle/);
+  assert.match(chatPage, /<ThemeToggle/);
+  assert.match(toggle, /useSyncExternalStore/);
+  assert.match(toggle, /localStorage\.setItem/);
+  assert.match(layout, /prefers-color-scheme: dark/);
+  assert.match(layout, /document\.documentElement\.dataset\.theme/);
+  assert.match(styles, /:root\[data-theme="dark"\]/);
+  assert.match(chatStyles, /:root\[data-theme="dark"\] \.chat-app-shell/);
+  assert.match(ambientGeometry, /MutationObserver/);
 });
 
 test("uses structured vision extraction without storing receipt image bytes", async () => {
@@ -68,18 +108,20 @@ test("gives Claude read-only ledger tools and live web search", async () => {
 });
 
 test("exposes conversation history and streaming chat UI", async () => {
-  const [api, page, ambientGeometry, chatStyles] = await Promise.all([
+  const [api, page, ambientGeometry, chatStyles, english] = await Promise.all([
     readFile(new URL("server/index.ts", root), "utf8"),
     readFile(new URL("app/chat/page.tsx", root), "utf8"),
     readFile(new URL("app/chat/ambient-geometry.tsx", root), "utf8"),
     readFile(new URL("app/chat/chat.css", root), "utf8"),
+    readFile(new URL("app/i18n/locales/en.json", root), "utf8"),
   ]);
   assert.match(api, /app\.get\("\/api\/chat\/conversations"/);
   assert.match(api, /text\/event-stream/);
   assert.match(api, /runChatAgent/);
   assert.match(api, /generateConversationTitle/);
   assert.doesNotMatch(api, /titleFromMessage/);
-  assert.match(page, /Conversation history/);
+  assert.match(page, /chat\.conversationHistory/);
+  assert.match(english, /Conversation history/);
   assert.match(page, /getReader\(\)/);
   assert.match(page, /ReactMarkdown/);
   assert.match(page, /remarkGfm/);
@@ -99,8 +141,79 @@ test("exposes conversation history and streaming chat UI", async () => {
   assert.match(ambientGeometry, /prefers-reduced-motion/);
   assert.match(ambientGeometry, /drawConnections/);
   assert.match(ambientGeometry, /Math\.floor\(point\.seed \* 6\)/);
-  assert.match(page, /Ledger · read only/);
-  assert.match(page, /Live web/);
+  assert.match(page, /chat\.ledgerReadOnly/);
+  assert.match(page, /chat\.liveWeb/);
+  assert.match(english, /Ledger · read only/);
+  assert.match(english, /Live web/);
+});
+
+test("reuses the animated chat geometry behind the main dashboard", async () => {
+  const [dashboard, styles, ambientGeometry] = await Promise.all([
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("app/globals.css", root), "utf8"),
+    readFile(new URL("app/chat/ambient-geometry.tsx", root), "utf8"),
+  ]);
+  assert.match(dashboard, /import AmbientGeometry from "\.\/chat\/ambient-geometry"/);
+  assert.match(dashboard, /className="dashboard-background" aria-hidden="true"/);
+  assert.match(dashboard, /className="dashboard-aurora"/);
+  assert.match(dashboard, /<AmbientGeometry \/>/);
+  assert.match(styles, /\.dashboard-background \{[^}]*position: fixed[^}]*pointer-events: none/s);
+  assert.match(styles, /\.dashboard-background \.ambient-geometry/);
+  assert.match(styles, /:root\[data-theme="dark"\] \.dashboard-background \.ambient-geometry/);
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.dashboard-aurora span \{ animation: none/);
+  assert.match(ambientGeometry, /drawConnections/);
+  assert.match(ambientGeometry, /Math\.floor\(point\.seed \* 6\)/);
+});
+
+function leafKeys(value, prefix = "") {
+  return Object.entries(value).flatMap(([key, child]) => {
+    const path = prefix ? `${prefix}.${key}` : key;
+    return child && typeof child === "object" ? leafKeys(child, path) : [path];
+  });
+}
+
+test("supports three persistent UI-only locales without translating stored user data", async () => {
+  const localeNames = ["en", "hy", "de"];
+  const [provider, switcher, layout, page, chatPage, styles, chatStyles, schema, api, ...localeFiles] = await Promise.all([
+    readFile(new URL("app/i18n/provider.tsx", root), "utf8"),
+    readFile(new URL("app/language-switcher.tsx", root), "utf8"),
+    readFile(new URL("app/layout.tsx", root), "utf8"),
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("app/chat/page.tsx", root), "utf8"),
+    readFile(new URL("app/globals.css", root), "utf8"),
+    readFile(new URL("app/chat/chat.css", root), "utf8"),
+    readFile(new URL("database/schema.sql", root), "utf8"),
+    readFile(new URL("server/index.ts", root), "utf8"),
+    ...localeNames.map((locale) => readFile(new URL(`app/i18n/locales/${locale}.json`, root), "utf8")),
+  ]);
+  const dictionaries = localeFiles.map(JSON.parse);
+  const englishKeys = leafKeys(dictionaries[0]).sort();
+
+  assert.deepEqual(localeNames, ["en", "hy", "de"]);
+  dictionaries.slice(1).forEach((dictionary) => assert.deepEqual(leafKeys(dictionary).sort(), englishKeys));
+  assert.match(provider, /supportedLocales[^=]*= \["en", "hy", "de"\]/);
+  assert.match(provider, /dramatiq-locale/);
+  assert.match(switcher, /role="menuitemradio"/);
+  assert.match(layout, /allowedLocales = \["en", "hy", "de"\]/);
+  assert.match(layout, /document\.documentElement\.dir = "ltr"/);
+  assert.doesNotMatch(provider, /"fa"/);
+  assert.doesNotMatch(layout, /"fa"/);
+  await assert.rejects(readFile(new URL("app/i18n/locales/fa.json", root), "utf8"));
+  assert.match(page, /<LanguageSwitcher/);
+  assert.match(chatPage, /<LanguageSwitcher/);
+  assert.doesNotMatch(styles, /:root\[dir="rtl"\]/);
+  assert.doesNotMatch(chatStyles, /:root\[dir="rtl"\]/);
+  assert.match(styles, /\.language-trigger \{ height: 40px/);
+  assert.match(chatStyles, /\.chat-language-switcher \.language-trigger \{ height: 30px/);
+
+  assert.match(page, /<option value=\{category\} key=\{category\}>\{categoryLabel\(category\)\}<\/option>/);
+  assert.match(page, /category: event\.target\.value as ReceiptItem\["category"\]/);
+  assert.match(page, /items: draft\.items/);
+  assert.match(chatPage, /<strong>\{conversation\.title\}<\/strong>/);
+  assert.match(chatPage, /AssistantMarkdown content=\{message\.content\}/);
+  assert.match(chatPage, /<div className="message-content">\{message\.content\}<\/div>/);
+  assert.doesNotMatch(schema, /dramatiq-locale|data-locale/);
+  assert.doesNotMatch(api, /dramatiq-locale|data-locale/);
 });
 
 test("keeps secrets out of the repository and validates changes in CI", async () => {
