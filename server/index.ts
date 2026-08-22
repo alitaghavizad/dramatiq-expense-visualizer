@@ -4,6 +4,13 @@ import helmet from "helmet";
 import multer from "multer";
 import { rateLimit } from "express-rate-limit";
 import { ZodError, z } from "zod";
+import {
+  ChatAgentConfigurationError,
+  ChatAgentError,
+  generateConversationTitle,
+  runChatAgent,
+  type ChatStage,
+} from "./chat-agent.js";
 import { config } from "./config.js";
 import { pool, withTransaction } from "./database.js";
 import { EXPENSE_CATEGORIES, extractReceipt, ReceiptExtractionError } from "./receipt-extractor.js";
@@ -84,6 +91,8 @@ app.get("/api/health", async (_request, response) => {
       database: "connected",
       receipt_extraction: config.geminiApiKey ? "ready" : "api_key_required",
       model: config.geminiModel,
+      chat_agent: config.anthropicApiKey ? "ready" : "api_key_required",
+      chat_model: config.claudeModel,
     });
   } catch (error) {
     console.error(error);
@@ -177,6 +186,242 @@ app.get("/api/dashboard", async (request, response, next) => {
       },
     });
   } catch (error) {
+    next(error);
+  }
+});
+
+const conversationIdSchema = z.uuid();
+const createConversationSchema = z.object({
+  title: z.string().trim().min(1).max(120).optional(),
+});
+const sendChatMessageSchema = z.object({
+  message: z.string().trim().min(1).max(8_000),
+});
+
+const chatRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 40,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { error: "Too many chat messages. Please wait a few minutes and try again." },
+});
+
+function sendChatEvent(response: Response, event: string, data: unknown) {
+  if (response.writableEnded || response.destroyed) return;
+  response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+app.get("/api/chat/conversations", async (_request, response, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT c.id::text, c.title, c.model, c.created_at, c.updated_at,
+              COALESCE(message_stats.message_count, 0)::int AS message_count,
+              last_message.content AS last_message,
+              last_message.role AS last_message_role
+       FROM chat_conversations c
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*)::int AS message_count
+         FROM chat_messages cm
+         WHERE cm.conversation_id = c.id
+       ) message_stats ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT cm.content, cm.role
+         FROM chat_messages cm
+         WHERE cm.conversation_id = c.id
+         ORDER BY cm.id DESC
+         LIMIT 1
+       ) last_message ON TRUE
+       ORDER BY c.updated_at DESC, c.created_at DESC
+       LIMIT 200`,
+    );
+    response.json({
+      conversations: result.rows.map((row) => ({
+        ...row,
+        last_message: row.last_message ? String(row.last_message).slice(0, 180) : null,
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/chat/conversations", async (request, response, next) => {
+  try {
+    const input = createConversationSchema.parse(request.body ?? {});
+    const result = await pool.query(
+      `INSERT INTO chat_conversations (title, model)
+       VALUES ($1, $2)
+       RETURNING id::text, title, model, created_at, updated_at`,
+      [input.title ?? "New conversation", config.claudeModel],
+    );
+    response.status(201).json({ ...result.rows[0], message_count: 0, last_message: null });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/chat/conversations/:id/messages", async (request, response, next) => {
+  try {
+    const conversationId = conversationIdSchema.parse(request.params.id);
+    const [conversationResult, messageResult] = await Promise.all([
+      pool.query(
+        `SELECT id::text, title, model, created_at, updated_at
+         FROM chat_conversations WHERE id = $1`,
+        [conversationId],
+      ),
+      pool.query(
+        `SELECT id::text, role, content, sources, created_at
+         FROM chat_messages
+         WHERE conversation_id = $1
+         ORDER BY id`,
+        [conversationId],
+      ),
+    ]);
+    if (!conversationResult.rowCount) {
+      response.status(404).json({ error: "Conversation not found." });
+      return;
+    }
+    response.json({ conversation: conversationResult.rows[0], messages: messageResult.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/chat/conversations/:id/messages", chatRateLimit, async (request, response, next) => {
+  let headersSent = false;
+  try {
+    if (!config.anthropicApiKey) {
+      response.status(503).json({
+        error: "Claude chat needs an Anthropic API key. Add ANTHROPIC_API_KEY to .env and restart the app.",
+        code: "ANTHROPIC_API_KEY_REQUIRED",
+      });
+      return;
+    }
+
+    const conversationId = conversationIdSchema.parse(request.params.id);
+    const input = sendChatMessageSchema.parse(request.body);
+    const conversationState = await withTransaction(async (client) => {
+      const conversationResult = await client.query(
+        `SELECT id::text, title, model, created_at, updated_at
+         FROM chat_conversations WHERE id = $1 FOR UPDATE`,
+        [conversationId],
+      );
+      if (!conversationResult.rowCount) return null;
+      const current = conversationResult.rows[0];
+      const shouldGenerateTitle = current.title === "New conversation";
+      await client.query(
+        `INSERT INTO chat_messages (conversation_id, role, content)
+         VALUES ($1, 'user', $2)`,
+        [conversationId, input.message],
+      );
+      const updated = await client.query(
+        `UPDATE chat_conversations
+         SET updated_at = NOW()
+         WHERE id = $1
+         RETURNING id::text, title, model, created_at, updated_at`,
+        [conversationId],
+      );
+      return { conversation: updated.rows[0], shouldGenerateTitle };
+    });
+
+    if (!conversationState) {
+      response.status(404).json({ error: "Conversation not found." });
+      return;
+    }
+
+    const { conversation, shouldGenerateTitle } = conversationState;
+    const titlePromise = shouldGenerateTitle
+      ? generateConversationTitle(input.message).catch((error) => {
+          console.error("Claude conversation title generation failed", error instanceof Error
+            ? { name: error.name, message: error.message }
+            : { error: String(error) });
+          return null;
+        })
+      : Promise.resolve(null);
+
+    const historyResult = await pool.query(
+      `SELECT role, content
+       FROM chat_messages
+       WHERE conversation_id = $1
+       ORDER BY id`,
+      [conversationId],
+    );
+
+    response.status(200);
+    response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    response.setHeader("Cache-Control", "no-cache, no-transform");
+    response.setHeader("Connection", "keep-alive");
+    response.setHeader("X-Accel-Buffering", "no");
+    response.flushHeaders();
+    headersSent = true;
+    sendChatEvent(response, "conversation", conversation);
+
+    const keepAlive = setInterval(() => {
+      if (!response.writableEnded && !response.destroyed) response.write(": keep-alive\n\n");
+    }, 15_000);
+
+    try {
+      const result = await runChatAgent(
+        historyResult.rows.map((row) => ({ role: row.role, content: row.content })),
+        {
+          onStage: (stage: ChatStage) => sendChatEvent(response, "stage", { stage }),
+          onText: (delta) => sendChatEvent(response, "delta", { delta }),
+        },
+      );
+      const generatedTitle = await titlePromise;
+
+      const saved = await withTransaction(async (client) => {
+        const messageResult = await client.query(
+          `INSERT INTO chat_messages (
+             conversation_id, role, content, sources, input_tokens, output_tokens
+           ) VALUES ($1, 'assistant', $2, $3::jsonb, $4, $5)
+           RETURNING id::text, role, content, sources, created_at`,
+          [
+            conversationId,
+            result.content,
+            JSON.stringify(result.sources),
+            result.inputTokens,
+            result.outputTokens,
+          ],
+        );
+        const conversationResult = generatedTitle
+          ? await client.query(
+              `UPDATE chat_conversations
+               SET title = CASE WHEN title = 'New conversation' THEN $2 ELSE title END,
+                   updated_at = NOW()
+               WHERE id = $1
+               RETURNING id::text, title, model, created_at, updated_at`,
+              [conversationId, generatedTitle],
+            )
+          : await client.query(
+              `UPDATE chat_conversations
+               SET updated_at = NOW()
+               WHERE id = $1
+               RETURNING id::text, title, model, created_at, updated_at`,
+              [conversationId],
+            );
+        return { message: messageResult.rows[0], conversation: conversationResult.rows[0] };
+      });
+
+      if (generatedTitle) sendChatEvent(response, "conversation", saved.conversation);
+      sendChatEvent(response, "sources", { sources: result.sources });
+      sendChatEvent(response, "done", { message: saved.message });
+      response.end();
+    } catch (error) {
+      const message = error instanceof ChatAgentConfigurationError || error instanceof ChatAgentError
+        ? error.message
+        : "Claude could not complete the response. Please try again.";
+      sendChatEvent(response, "error", { error: message });
+      response.end();
+    } finally {
+      clearInterval(keepAlive);
+    }
+  } catch (error) {
+    if (headersSent) {
+      sendChatEvent(response, "error", { error: "The chat request could not be completed." });
+      response.end();
+      return;
+    }
     next(error);
   }
 });

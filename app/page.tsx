@@ -11,6 +11,7 @@ import {
   Filter,
   LayoutDashboard,
   LoaderCircle,
+  MessageCircleMore,
   Plus,
   ReceiptText,
   Search,
@@ -361,6 +362,7 @@ export default function Home() {
           <a className="nav-item active" href="#overview" aria-label="Overview"><LayoutDashboard size={19} /></a>
           <a className="nav-item" href="#insights" aria-label="Insights"><BarChart3 size={19} /></a>
           <a className="nav-item" href="#purchases" aria-label="Purchases"><WalletCards size={19} /></a>
+          <a className="nav-item" href="/chat" aria-label="Claude chat"><MessageCircleMore size={19} /></a>
         </nav>
         <button className="sidebar-add" type="button" onClick={openFilePicker} aria-label="Add receipt"><Plus size={19} /></button>
         <div className="user-badge">AM</div>

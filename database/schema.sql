@@ -44,6 +44,34 @@ CREATE INDEX IF NOT EXISTS expenses_store_idx ON expenses (store);
 CREATE INDEX IF NOT EXISTS expenses_total_price_idx ON expenses (total_price);
 CREATE INDEX IF NOT EXISTS expenses_receipt_id_idx ON expenses (receipt_id);
 
+CREATE TABLE IF NOT EXISTS chat_conversations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  title TEXT NOT NULL DEFAULT 'New conversation',
+  model TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id BIGSERIAL PRIMARY KEY,
+  conversation_id UUID NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  sources JSONB NOT NULL DEFAULT '[]'::jsonb,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT chat_message_role CHECK (role IN ('user', 'assistant')),
+  CONSTRAINT chat_message_content_nonempty CHECK (length(btrim(content)) > 0),
+  CONSTRAINT chat_message_input_tokens_nonnegative CHECK (input_tokens IS NULL OR input_tokens >= 0),
+  CONSTRAINT chat_message_output_tokens_nonnegative CHECK (output_tokens IS NULL OR output_tokens >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS chat_conversations_updated_at_idx
+  ON chat_conversations (updated_at DESC);
+CREATE INDEX IF NOT EXISTS chat_messages_conversation_id_idx
+  ON chat_messages (conversation_id, id);
+
 CREATE OR REPLACE FUNCTION set_expenses_updated_at()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -60,3 +88,5 @@ FOR EACH ROW EXECUTE FUNCTION set_expenses_updated_at();
 COMMENT ON TABLE expenses IS 'One row per purchased item extracted from a receipt.';
 COMMENT ON COLUMN expenses.item_name IS 'Original item name, usually Armenian, exactly as reviewed by the user.';
 COMMENT ON COLUMN expenses.item_name_en IS 'English translation used for search and display.';
+COMMENT ON TABLE chat_conversations IS 'Durable Claude chat threads available for later continuation.';
+COMMENT ON TABLE chat_messages IS 'User and assistant messages replayed to preserve conversation memory.';
